@@ -62,11 +62,7 @@ library ComposableExecutionLib {
         // we don't restrict it since some calls may want to call address(0)
         // if a param with VALUE type was not provided, it will be 0
         // this is even more often case, as many calls happen with 0 value
-        return Execution({
-            target: composedTarget, 
-            value: composedValue,
-            callData: composedCalldata
-        });
+        return Execution({ target: composedTarget, value: composedValue, callData: composedCalldata });
     }
 
     // Process a single input parameter and return the composed calldata
@@ -99,8 +95,7 @@ library ComposableExecutionLib {
 
             // expect paramData to be abi.encodePacked(address token, address account)
             // Validate exact length requirement
-            require(paramData.length == 40, 
-                     InvalidParameterEncoding("Invalid paramData length"));
+            require(paramData.length == 40, InvalidParameterEncoding("Invalid paramData length"));
             assembly {
                 tokenAddr := shr(96, calldataload(paramData.offset))
                 account := shr(96, calldataload(add(paramData.offset, 0x14)))

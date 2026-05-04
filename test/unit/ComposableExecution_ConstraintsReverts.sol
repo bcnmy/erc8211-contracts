@@ -77,10 +77,7 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         // Prepare invalid input param - call should revert
         InputParam[] memory invalidInputParams = new InputParam[](3);
         invalidInputParams[0] = InputParam({
-            paramType: InputParamType.CALL_DATA,
-            fetcherType: InputParamFetcherType.RAW_BYTES,
-            paramData: abi.encode(42),
-            constraints: constraints
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(42), constraints: constraints
         });
         invalidInputParams[1] = _createRawTargetInputParam(address(0));
         invalidInputParams[2] = _createRawValueInputParam(0);
@@ -88,10 +85,7 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         // Prepare valid input param - call should succeed
         InputParam[] memory validInputParams = new InputParam[](3);
         validInputParams[0] = InputParam({
-            paramType: InputParamType.CALL_DATA,
-            fetcherType: InputParamFetcherType.RAW_BYTES,
-            paramData: abi.encode(43),
-            constraints: constraints
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(43), constraints: constraints
         });
         validInputParams[1] = _createRawTargetInputParam(address(0));
         validInputParams[2] = _createRawValueInputParam(0);
@@ -296,10 +290,7 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         // Prepare valid input param - call should succeed
         InputParam[] memory validInputParams = new InputParam[](3);
         validInputParams[0] = InputParam({
-            paramType: InputParamType.CALL_DATA,
-            fetcherType: InputParamFetcherType.RAW_BYTES,
-            paramData: abi.encode(42),
-            constraints: constraints
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(42), constraints: constraints
         });
         validInputParams[1] = _createRawTargetInputParam(address(0));
         validInputParams[2] = _createRawValueInputParam(0);
@@ -360,8 +351,9 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
 
         bytes memory expectedRevertReason;
         if (address(account) == address(mockAccountFallback)) {
-            expectedRevertReason =
-                abi.encodeWithSelector(MockAccountFallback.FallbackFailed.selector, abi.encodePacked(ComposableExecutionLib.ComposableExecutionFailed.selector));
+            expectedRevertReason = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector, abi.encodePacked(ComposableExecutionLib.ComposableExecutionFailed.selector)
+            );
         } else {
             expectedRevertReason = abi.encodePacked(ComposableExecutionLib.ComposableExecutionFailed.selector);
         }
