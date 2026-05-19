@@ -485,6 +485,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _nestedOrRevertsEvenWhenEarlierSubMatches(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_Non_Canonical_ReferenceData_Reverts() public {
+        _nonCanonicalReferenceDataReverts(address(mockAccount), address(mockAccount));
+        _nonCanonicalReferenceDataReverts(address(mockAccountFallback), address(composabilityHandler));
+        _nonCanonicalReferenceDataReverts(address(mockAccountCaller), address(composabilityHandler));
+        _nonCanonicalReferenceDataReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     function test_In_With_Reversed_Bounds_Reverts() public {
         _inReversedBoundsReverts(address(mockAccount), address(mockAccount));
         _inReversedBoundsReverts(address(mockAccountFallback), address(composabilityHandler));
@@ -1149,6 +1156,50 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
             }
             vm.expectRevert(expectedRevert);
             IComposableExecution(address(account)).executeComposable(failingExecutions);
+        }
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // Leaf branches that read referenceData via bytes32(c.referenceData) must
+    // require exactly 32 bytes — left-aligned zero-padding would otherwise
+    // silently miscompare against non-canonical encodings such as
+    // abi.encodePacked(uint8(5)), which would compare against
+    // 0x0500000000…00 instead of the expected 0x000…05.
+    // -----------------------------------------------------------------------
+    function _nonCanonicalReferenceDataReverts(address account, address caller) internal {
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+
+        ConstraintType[5] memory leafTypes = [ConstraintType.EQ, ConstraintType.GTE, ConstraintType.LTE, ConstraintType.GTE_SIGNED, ConstraintType.LTE_SIGNED];
+
+        for (uint256 k; k < leafTypes.length; ++k) {
+            Constraint[] memory constraints = new Constraint[](1);
+            // 1 byte instead of the required 32 — left-aligns under bytes32 cast.
+            constraints[0] = Constraint({ constraintType: leafTypes[k], referenceData: abi.encodePacked(uint8(5)) });
+
+            InputParam[] memory inputParams = new InputParam[](3);
+            inputParams[0] = InputParam({
+                paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(uint256(5)), constraints: constraints
+            });
+            inputParams[1] = _createRawTargetInputParam(address(0));
+            inputParams[2] = _createRawValueInputParam(0);
+
+            ComposableExecution[] memory executions = new ComposableExecution[](1);
+            executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+            bytes memory expectedRevert;
+            if (address(account) == address(mockAccountFallback)) {
+                expectedRevert = abi.encodeWithSelector(
+                    MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InvalidReferenceDataLength.selector)
+                );
+            } else {
+                expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidReferenceDataLength.selector);
+            }
+            vm.expectRevert(expectedRevert);
+            IComposableExecution(address(account)).executeComposable(executions);
         }
 
         vm.stopPrank();
