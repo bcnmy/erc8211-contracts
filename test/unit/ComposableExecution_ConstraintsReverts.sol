@@ -478,6 +478,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _nestedOrReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_Empty_Or_Reverts_With_EmptyOrSubConstraints() public {
+        _emptyOrReverts(address(mockAccount), address(mockAccount));
+        _emptyOrReverts(address(mockAccountFallback), address(composabilityHandler));
+        _emptyOrReverts(address(mockAccountCaller), address(composabilityHandler));
+        _emptyOrReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     // -----------------------------------------------------------------------
     // GTE_SIGNED: checks that int256(-5) is the lower bound.
     // value = int256(-10) => fails (below bound)
@@ -998,6 +1005,44 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
             );
         } else {
             expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintType.selector);
+        }
+        vm.expectRevert(expectedRevert);
+        IComposableExecution(address(account)).executeComposable(executions);
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty OR (an OR whose sub-array has length 0) is impossible to satisfy
+    // and is rejected explicitly so off-chain tooling can flag malformed
+    // payloads without needing to evaluate anything.
+    // -----------------------------------------------------------------------
+    function _emptyOrReverts(address account, address caller) internal {
+        Constraint[] memory emptySubs = new Constraint[](0);
+
+        Constraint[] memory constraints = new Constraint[](1);
+        constraints[0] = Constraint({ constraintType: ConstraintType.OR, referenceData: abi.encode(emptySubs) });
+
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        InputParam[] memory inputParams = new InputParam[](3);
+        inputParams[0] = InputParam({
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(uint256(42)), constraints: constraints
+        });
+        inputParams[1] = _createRawTargetInputParam(address(0));
+        inputParams[2] = _createRawValueInputParam(0);
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+        ComposableExecution[] memory executions = new ComposableExecution[](1);
+        executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+        bytes memory expectedRevert;
+        if (address(account) == address(mockAccountFallback)) {
+            expectedRevert = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.EmptyOrSubConstraints.selector)
+            );
+        } else {
+            expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.EmptyOrSubConstraints.selector);
         }
         vm.expectRevert(expectedRevert);
         IComposableExecution(address(account)).executeComposable(executions);
