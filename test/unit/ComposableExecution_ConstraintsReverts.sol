@@ -492,6 +492,20 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _nonCanonicalReferenceDataReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_Insufficient_RawValue_Reverts() public {
+        _insufficientRawValueReverts(address(mockAccount), address(mockAccount));
+        _insufficientRawValueReverts(address(mockAccountFallback), address(composabilityHandler));
+        _insufficientRawValueReverts(address(mockAccountCaller), address(composabilityHandler));
+        _insufficientRawValueReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
+    function test_Balance_With_Multiple_Constraints_Reverts() public {
+        _balanceWithMultipleConstraintsReverts(address(mockAccount), address(mockAccount));
+        _balanceWithMultipleConstraintsReverts(address(mockAccountFallback), address(composabilityHandler));
+        _balanceWithMultipleConstraintsReverts(address(mockAccountCaller), address(composabilityHandler));
+        _balanceWithMultipleConstraintsReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     function test_In_With_Reversed_Bounds_Reverts() public {
         _inReversedBoundsReverts(address(mockAccount), address(mockAccount));
         _inReversedBoundsReverts(address(mockAccountFallback), address(composabilityHandler));
@@ -1157,6 +1171,94 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
             vm.expectRevert(expectedRevert);
             IComposableExecution(address(account)).executeComposable(failingExecutions);
         }
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // STATIC_CALL to an EOA returns returndatasize 0. Before the bounds
+    // check, the assembly mload in _validateConstraints read past rawValue
+    // into the freshly allocated Constraint struct's first word, which is
+    // the constraint type index. GTE_SIGNED encoded as 4 and GTE_SIGNED(0)
+    // would silently pass against the out-of-bounds value 4 (>= 0), so a
+    // signed oracle sanity check could be bypassed when the staticcall
+    // target had no code.
+    // -----------------------------------------------------------------------
+    function _insufficientRawValueReverts(address account, address caller) internal {
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        // EOA: no code, staticcall succeeds with zero returndata.
+        address eoa = address(0xeaee0a);
+        assertEq(eoa.code.length, 0);
+
+        Constraint[] memory constraints = new Constraint[](1);
+        constraints[0] = Constraint({ constraintType: ConstraintType.GTE_SIGNED, referenceData: abi.encode(int256(0)) });
+
+        InputParam[] memory inputParams = new InputParam[](3);
+        inputParams[0] = _createRawTargetInputParam(address(0));
+        inputParams[1] = _createRawValueInputParam(0);
+        inputParams[2] = InputParam({
+            paramType: InputParamType.CALL_DATA,
+            fetcherType: InputParamFetcherType.STATIC_CALL,
+            paramData: abi.encode(eoa, abi.encodeWithSignature("anything()")),
+            constraints: constraints
+        });
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+        ComposableExecution[] memory executions = new ComposableExecution[](1);
+        executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+        bytes memory expectedRevert;
+        if (address(account) == address(mockAccountFallback)) {
+            expectedRevert = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InsufficientRawValue.selector)
+            );
+        } else {
+            expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InsufficientRawValue.selector);
+        }
+        vm.expectRevert(expectedRevert);
+        IComposableExecution(address(account)).executeComposable(executions);
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // BALANCE always resolves to a single 32-byte word, so a second
+    // constraint would index past it. Reject up front with an attributable
+    // error rather than relying on the rawValue bounds check.
+    // -----------------------------------------------------------------------
+    function _balanceWithMultipleConstraintsReverts(address account, address caller) internal {
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        Constraint[] memory constraints = new Constraint[](2);
+        constraints[0] = Constraint({ constraintType: ConstraintType.GTE, referenceData: abi.encode(bytes32(uint256(0))) });
+        constraints[1] = Constraint({ constraintType: ConstraintType.LTE, referenceData: abi.encode(bytes32(type(uint256).max)) });
+
+        InputParam[] memory inputParams = new InputParam[](3);
+        inputParams[0] = _createRawTargetInputParam(address(0));
+        inputParams[1] = _createRawValueInputParam(0);
+        inputParams[2] = InputParam({
+            paramType: InputParamType.CALL_DATA,
+            fetcherType: InputParamFetcherType.BALANCE,
+            paramData: abi.encodePacked(address(0), address(0xa11ce)),
+            constraints: constraints
+        });
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+        ComposableExecution[] memory executions = new ComposableExecution[](1);
+        executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+        bytes memory expectedRevert;
+        if (address(account) == address(mockAccountFallback)) {
+            expectedRevert = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector,
+                abi.encodeWithSelector(ComposableExecutionLib.InvalidSetOfInputParams.selector, "BALANCE supports at most 1 constraint")
+            );
+        } else {
+            expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidSetOfInputParams.selector, "BALANCE supports at most 1 constraint");
+        }
+        vm.expectRevert(expectedRevert);
+        IComposableExecution(address(account)).executeComposable(executions);
 
         vm.stopPrank();
     }
