@@ -485,6 +485,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _emptyOrReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_inputs_With_Skip_Constraint() public {
+        _inputParamUsingSkipConstraint(address(mockAccount), address(mockAccount));
+        _inputParamUsingSkipConstraint(address(mockAccountFallback), address(composabilityHandler));
+        _inputParamUsingSkipConstraint(address(mockAccountCaller), address(composabilityHandler));
+        _inputParamUsingSkipConstraint(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     // -----------------------------------------------------------------------
     // GTE_SIGNED: checks that int256(-5) is the lower bound.
     // value = int256(-10) => fails (below bound)
@@ -1008,6 +1015,78 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         }
         vm.expectRevert(expectedRevert);
         IComposableExecution(address(account)).executeComposable(executions);
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // SKIP unconditionally passes so signers can ignore a specific 32-byte
+    // field of a multi-word static-call return without padding earlier
+    // positions with dummy always-true predicates. dummyContract.returnMultipleValues()
+    // returns (uint256(2517), address(this), keccak256("DUMMY"), true); we
+    // check only the 4th field (bool true) and skip the first three.
+    // -----------------------------------------------------------------------
+    function _inputParamUsingSkipConstraint(address account, address caller) internal {
+        Constraint[] memory constraints = new Constraint[](4);
+        constraints[0] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: bytes("") });
+        constraints[1] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: bytes("") });
+        constraints[2] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: bytes("") });
+        constraints[3] = Constraint({ constraintType: ConstraintType.EQ, referenceData: abi.encode(bytes32(uint256(1))) });
+
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+
+        // Valid: 4th field is bool true == bytes32(uint256(1))
+        {
+            InputParam[] memory validInputParams = new InputParam[](3);
+            validInputParams[0] = _createRawTargetInputParam(address(0));
+            validInputParams[1] = _createRawValueInputParam(0);
+            validInputParams[2] = InputParam({
+                paramType: InputParamType.CALL_DATA,
+                fetcherType: InputParamFetcherType.STATIC_CALL,
+                paramData: abi.encode(address(dummyContract), abi.encodeWithSelector(DummyContract.returnMultipleValues.selector)),
+                constraints: constraints
+            });
+
+            ComposableExecution[] memory validExecutions = new ComposableExecution[](1);
+            validExecutions[0] = ComposableExecution({ functionSig: "", inputParams: validInputParams, outputParams: outputParams });
+            IComposableExecution(address(account)).executeComposable(validExecutions);
+        }
+
+        // Invalid: change EQ target to bytes32(uint256(99)) so the 4th field comparison fails,
+        // proving SKIP did not silently swallow the explicit check.
+        {
+            Constraint[] memory failingConstraints = new Constraint[](4);
+            failingConstraints[0] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: bytes("") });
+            failingConstraints[1] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: bytes("") });
+            failingConstraints[2] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: bytes("") });
+            failingConstraints[3] = Constraint({ constraintType: ConstraintType.EQ, referenceData: abi.encode(bytes32(uint256(99))) });
+
+            InputParam[] memory invalidInputParams = new InputParam[](3);
+            invalidInputParams[0] = _createRawTargetInputParam(address(0));
+            invalidInputParams[1] = _createRawValueInputParam(0);
+            invalidInputParams[2] = InputParam({
+                paramType: InputParamType.CALL_DATA,
+                fetcherType: InputParamFetcherType.STATIC_CALL,
+                paramData: abi.encode(address(dummyContract), abi.encodeWithSelector(DummyContract.returnMultipleValues.selector)),
+                constraints: failingConstraints
+            });
+
+            ComposableExecution[] memory failingExecutions = new ComposableExecution[](1);
+            failingExecutions[0] = ComposableExecution({ functionSig: "", inputParams: invalidInputParams, outputParams: outputParams });
+
+            bytes memory expectedRevert;
+            if (address(account) == address(mockAccountFallback)) {
+                expectedRevert = abi.encodeWithSelector(
+                    MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.ConstraintNotMet.selector, ConstraintType.EQ)
+                );
+            } else {
+                expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.ConstraintNotMet.selector, ConstraintType.EQ);
+            }
+            vm.expectRevert(expectedRevert);
+            IComposableExecution(address(account)).executeComposable(failingExecutions);
+        }
 
         vm.stopPrank();
     }
