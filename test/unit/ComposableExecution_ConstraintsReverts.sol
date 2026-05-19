@@ -478,6 +478,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _nestedOrReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_Nested_Or_Reverts_Even_When_Earlier_Sub_Matches() public {
+        _nestedOrRevertsEvenWhenEarlierSubMatches(address(mockAccount), address(mockAccount));
+        _nestedOrRevertsEvenWhenEarlierSubMatches(address(mockAccountFallback), address(composabilityHandler));
+        _nestedOrRevertsEvenWhenEarlierSubMatches(address(mockAccountCaller), address(composabilityHandler));
+        _nestedOrRevertsEvenWhenEarlierSubMatches(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     function test_Empty_Or_Reverts_With_EmptyOrSubConstraints() public {
         _emptyOrReverts(address(mockAccount), address(mockAccount));
         _emptyOrReverts(address(mockAccountFallback), address(composabilityHandler));
@@ -974,7 +981,9 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
     // -----------------------------------------------------------------------
     // Nested OR is intentionally rejected to keep the signed payload flat and
     // easy to display. An OR whose sub-array contains another OR must revert
-    // with InvalidConstraintType when _checkConstraint encounters the inner OR.
+    // with InvalidConstraintType — the structural pre-pass in _validateConstraints
+    // detects it before any sub is evaluated, so rejection is independent of
+    // whether any earlier sub happens to match the runtime value.
     // -----------------------------------------------------------------------
     function _nestedOrReverts(address account, address caller) internal {
         // Inner OR with two leaf alternatives
@@ -997,6 +1006,53 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         InputParam[] memory inputParams = new InputParam[](3);
         inputParams[0] = InputParam({
             paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(uint256(7)), constraints: constraints
+        });
+        inputParams[1] = _createRawTargetInputParam(address(0));
+        inputParams[2] = _createRawValueInputParam(0);
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+        ComposableExecution[] memory executions = new ComposableExecution[](1);
+        executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+        bytes memory expectedRevert;
+        if (address(account) == address(mockAccountFallback)) {
+            expectedRevert = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintType.selector)
+            );
+        } else {
+            expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintType.selector);
+        }
+        vm.expectRevert(expectedRevert);
+        IComposableExecution(address(account)).executeComposable(executions);
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // Same nested-OR shape as above, but with value = 0 so the outer OR's
+    // first sub (EQ(0)) DOES match. Before the structural pre-pass, the loop
+    // short-circuited on that match and never reached the inner OR, so the
+    // payload was silently accepted — making "what you sign" rendering
+    // inconsistent with on-chain behavior. The pre-pass must reject this
+    // regardless of runtime value.
+    // -----------------------------------------------------------------------
+    function _nestedOrRevertsEvenWhenEarlierSubMatches(address account, address caller) internal {
+        Constraint[] memory innerSubs = new Constraint[](2);
+        innerSubs[0] = Constraint({ constraintType: ConstraintType.EQ, referenceData: abi.encode(bytes32(uint256(1))) });
+        innerSubs[1] = Constraint({ constraintType: ConstraintType.EQ, referenceData: abi.encode(bytes32(uint256(2))) });
+
+        Constraint[] memory outerSubs = new Constraint[](2);
+        outerSubs[0] = Constraint({ constraintType: ConstraintType.EQ, referenceData: abi.encode(bytes32(uint256(0))) });
+        outerSubs[1] = Constraint({ constraintType: ConstraintType.OR, referenceData: abi.encode(innerSubs) });
+
+        Constraint[] memory constraints = new Constraint[](1);
+        constraints[0] = Constraint({ constraintType: ConstraintType.OR, referenceData: abi.encode(outerSubs) });
+
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        InputParam[] memory inputParams = new InputParam[](3);
+        inputParams[0] = InputParam({
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(uint256(0)), constraints: constraints
         });
         inputParams[1] = _createRawTargetInputParam(address(0));
         inputParams[2] = _createRawValueInputParam(0);
