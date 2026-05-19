@@ -485,6 +485,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _nestedOrRevertsEvenWhenEarlierSubMatches(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_In_With_Reversed_Bounds_Reverts() public {
+        _inReversedBoundsReverts(address(mockAccount), address(mockAccount));
+        _inReversedBoundsReverts(address(mockAccountFallback), address(composabilityHandler));
+        _inReversedBoundsReverts(address(mockAccountCaller), address(composabilityHandler));
+        _inReversedBoundsReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     function test_Empty_Or_Reverts_With_EmptyOrSubConstraints() public {
         _emptyOrReverts(address(mockAccount), address(mockAccount));
         _emptyOrReverts(address(mockAccountFallback), address(composabilityHandler));
@@ -1142,6 +1149,56 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
             }
             vm.expectRevert(expectedRevert);
             IComposableExecution(address(account)).executeComposable(failingExecutions);
+        }
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // IN with unsigned lower > upper must revert immediately rather than
+    // silently accepting an empty set. Covers:
+    //   - same-sign descending order: IN(10, 1)
+    //   - mixed-sign signed range:    IN(-10, 10) (negative encodes huge, so lower > upper unsigned)
+    //   - same-sign signed descending: IN(-10, -100)
+    // The audit also flagged IN(10, -10) (swapped bounds, fail-open). That
+    // shape has unsigned lower < upper so the lower > upper check does not
+    // catch it; addressing it requires a dedicated IN_SIGNED variant.
+    // -----------------------------------------------------------------------
+    function _inReversedBoundsReverts(address account, address caller) internal {
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+
+        bytes32[3][3] memory cases = [
+            [bytes32(uint256(10)), bytes32(uint256(1)), bytes32(uint256(5))],
+            [bytes32(uint256(int256(-10))), bytes32(uint256(10)), bytes32(uint256(0))],
+            [bytes32(uint256(int256(-10))), bytes32(uint256(int256(-100))), bytes32(uint256(int256(-50)))]
+        ];
+
+        for (uint256 k; k < cases.length; ++k) {
+            Constraint[] memory constraints = new Constraint[](1);
+            constraints[0] = Constraint({ constraintType: ConstraintType.IN, referenceData: abi.encode(cases[k][0], cases[k][1]) });
+
+            InputParam[] memory inputParams = new InputParam[](3);
+            inputParams[0] = InputParam({
+                paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(cases[k][2]), constraints: constraints
+            });
+            inputParams[1] = _createRawTargetInputParam(address(0));
+            inputParams[2] = _createRawValueInputParam(0);
+
+            ComposableExecution[] memory executions = new ComposableExecution[](1);
+            executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+            bytes memory expectedRevert;
+            if (address(account) == address(mockAccountFallback)) {
+                expectedRevert = abi.encodeWithSelector(
+                    MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintRange.selector)
+                );
+            } else {
+                expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintRange.selector);
+            }
+            vm.expectRevert(expectedRevert);
+            IComposableExecution(address(account)).executeComposable(executions);
         }
 
         vm.stopPrank();
