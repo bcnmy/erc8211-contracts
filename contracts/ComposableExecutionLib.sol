@@ -257,14 +257,23 @@ library ComposableExecutionLib {
             if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
             return value <= bytes32(c.referenceData);
         } else if (ct == ConstraintType.IN) {
+            // Unsigned range only. Signers wanting a signed range must use IN_SIGNED — the unsigned
+            // comparison here cannot detect the fail-open shape IN(10, -10) where the negative bound
+            // encodes to a huge unsigned and the apparent range widens to "magnitude >= 10".
             (bytes32 lower, bytes32 upper) = abi.decode(c.referenceData, (bytes32, bytes32));
-            // Bounds are compared unsigned. Reject lower > upper so:
-            //   - same-sign signed ranges written in descending order revert instead of accepting nothing,
-            //   - mixed-sign ranges like IN(-10, 10) revert (negative encodes to a huge unsigned) instead
-            //     of being unsatisfiable,
-            //   - reversed bounds like IN(10, -10) revert instead of silently widening to "magnitude >= 10".
             if (lower > upper) revert InvalidConstraintRange();
             return value >= lower && value <= upper;
+        } else if (ct == ConstraintType.IN_SIGNED) {
+            // Signed range. Bounds and value are reinterpreted as int256, so the high bit means
+            // negative. Catches all three concerning shapes the unsigned IN cannot: IN_SIGNED(-10, 10)
+            // works as expected, IN_SIGNED(-10, -100) reverts via signed lower > upper, and the
+            // fail-open IN_SIGNED(10, -10) also reverts because signed 10 > signed -10.
+            (bytes32 lowerBytes, bytes32 upperBytes) = abi.decode(c.referenceData, (bytes32, bytes32));
+            int256 lower = int256(uint256(lowerBytes));
+            int256 upper = int256(uint256(upperBytes));
+            if (lower > upper) revert InvalidConstraintRange();
+            int256 valueInt = int256(uint256(value));
+            return valueInt >= lower && valueInt <= upper;
         } else if (ct == ConstraintType.GTE_SIGNED) {
             // Reinterprets value as int256: any 32-byte word with the high bit set becomes
             // negative under two's complement. Callers must only use GTE_SIGNED / LTE_SIGNED

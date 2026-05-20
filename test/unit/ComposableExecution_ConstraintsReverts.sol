@@ -513,6 +513,20 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _inReversedBoundsReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_inputs_With_InSigned_Constraints() public {
+        _inputParamUsingInSignedConstraints(address(mockAccount), address(mockAccount));
+        _inputParamUsingInSignedConstraints(address(mockAccountFallback), address(composabilityHandler));
+        _inputParamUsingInSignedConstraints(address(mockAccountCaller), address(composabilityHandler));
+        _inputParamUsingInSignedConstraints(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
+    function test_InSigned_With_Reversed_Bounds_Reverts() public {
+        _inSignedReversedBoundsReverts(address(mockAccount), address(mockAccount));
+        _inSignedReversedBoundsReverts(address(mockAccountFallback), address(composabilityHandler));
+        _inSignedReversedBoundsReverts(address(mockAccountCaller), address(composabilityHandler));
+        _inSignedReversedBoundsReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     function test_Empty_Or_Reverts_With_EmptyOrSubConstraints() public {
         _emptyOrReverts(address(mockAccount), address(mockAccount));
         _emptyOrReverts(address(mockAccountFallback), address(composabilityHandler));
@@ -1331,6 +1345,131 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         for (uint256 k; k < cases.length; ++k) {
             Constraint[] memory constraints = new Constraint[](1);
             constraints[0] = Constraint({ constraintType: ConstraintType.IN, referenceData: abi.encode(cases[k][0], cases[k][1]) });
+
+            InputParam[] memory inputParams = new InputParam[](3);
+            inputParams[0] = InputParam({
+                paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(cases[k][2]), constraints: constraints
+            });
+            inputParams[1] = _createRawTargetInputParam(address(0));
+            inputParams[2] = _createRawValueInputParam(0);
+
+            ComposableExecution[] memory executions = new ComposableExecution[](1);
+            executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+            bytes memory expectedRevert;
+            if (address(account) == address(mockAccountFallback)) {
+                expectedRevert = abi.encodeWithSelector(
+                    MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintRange.selector)
+                );
+            } else {
+                expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidConstraintRange.selector);
+            }
+            vm.expectRevert(expectedRevert);
+            IComposableExecution(address(account)).executeComposable(executions);
+        }
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // IN_SIGNED: signed range, bounds and value compared as int256. Verifies
+    // the cases that unsigned IN cannot handle correctly: ranges spanning
+    // zero, negative ranges, and the previously fail-open swapped form.
+    // -----------------------------------------------------------------------
+    function _inputParamUsingInSignedConstraints(address account, address caller) internal {
+        // Range: [-10, 10] — spans zero, would be unsatisfiable as unsigned IN.
+        Constraint[] memory constraints = new Constraint[](1);
+        constraints[0] = Constraint({ constraintType: ConstraintType.IN_SIGNED, referenceData: abi.encode(int256(-10), int256(10)) });
+
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+        OutputParam[] memory outputParams = new OutputParam[](0);
+
+        // In-range values: -10, 0, 10 (inclusive bounds)
+        int256[3] memory inRange = [int256(-10), int256(0), int256(10)];
+        for (uint256 k; k < inRange.length; ++k) {
+            InputParam[] memory inputParams = new InputParam[](3);
+            inputParams[0] = InputParam({
+                paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(inRange[k]), constraints: constraints
+            });
+            inputParams[1] = _createRawTargetInputParam(address(0));
+            inputParams[2] = _createRawValueInputParam(0);
+
+            ComposableExecution[] memory executions = new ComposableExecution[](1);
+            executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+            IComposableExecution(address(account)).executeComposable(executions);
+        }
+
+        // Out-of-range values: -11, 11 — should revert ConstraintNotMet(IN_SIGNED)
+        int256[2] memory outOfRange = [int256(-11), int256(11)];
+        for (uint256 k; k < outOfRange.length; ++k) {
+            InputParam[] memory inputParams = new InputParam[](3);
+            inputParams[0] = InputParam({
+                paramType: InputParamType.CALL_DATA,
+                fetcherType: InputParamFetcherType.RAW_BYTES,
+                paramData: abi.encode(outOfRange[k]),
+                constraints: constraints
+            });
+            inputParams[1] = _createRawTargetInputParam(address(0));
+            inputParams[2] = _createRawValueInputParam(0);
+
+            ComposableExecution[] memory executions = new ComposableExecution[](1);
+            executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+            bytes memory expectedRevert;
+            if (address(account) == address(mockAccountFallback)) {
+                expectedRevert = abi.encodeWithSelector(
+                    MockAccountFallback.FallbackFailed.selector,
+                    abi.encodeWithSelector(ComposableExecutionLib.ConstraintNotMet.selector, ConstraintType.IN_SIGNED)
+                );
+            } else {
+                expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.ConstraintNotMet.selector, ConstraintType.IN_SIGNED);
+            }
+            vm.expectRevert(expectedRevert);
+            IComposableExecution(address(account)).executeComposable(executions);
+        }
+
+        // Negative-only range [-100, -10] with value -50 (in range)
+        {
+            Constraint[] memory negConstraints = new Constraint[](1);
+            negConstraints[0] = Constraint({ constraintType: ConstraintType.IN_SIGNED, referenceData: abi.encode(int256(-100), int256(-10)) });
+
+            InputParam[] memory inputParams = new InputParam[](3);
+            inputParams[0] = InputParam({
+                paramType: InputParamType.CALL_DATA,
+                fetcherType: InputParamFetcherType.RAW_BYTES,
+                paramData: abi.encode(int256(-50)),
+                constraints: negConstraints
+            });
+            inputParams[1] = _createRawTargetInputParam(address(0));
+            inputParams[2] = _createRawValueInputParam(0);
+
+            ComposableExecution[] memory executions = new ComposableExecution[](1);
+            executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+            IComposableExecution(address(account)).executeComposable(executions);
+        }
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // IN_SIGNED with signed lower > upper must revert (InvalidConstraintRange).
+    // Critically, the previously fail-open shape IN(10, -10) — which unsigned
+    // IN cannot detect — is caught here because signed 10 > signed -10.
+    // -----------------------------------------------------------------------
+    function _inSignedReversedBoundsReverts(address account, address caller) internal {
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+        OutputParam[] memory outputParams = new OutputParam[](0);
+
+        // Cases: { lower, upper, probe_value }. lower > upper as signed in all three.
+        int256[3][3] memory cases = [
+            [int256(10), int256(-10), int256(5)], // the audit's case 2 — fail-open under unsigned IN
+            [int256(10), int256(1), int256(5)], // same-sign positive descending
+            [int256(-10), int256(-100), int256(-50)] // same-sign negative descending
+        ];
+
+        for (uint256 k; k < cases.length; ++k) {
+            Constraint[] memory constraints = new Constraint[](1);
+            constraints[0] = Constraint({ constraintType: ConstraintType.IN_SIGNED, referenceData: abi.encode(cases[k][0], cases[k][1]) });
 
             InputParam[] memory inputParams = new InputParam[](3);
             inputParams[0] = InputParam({
