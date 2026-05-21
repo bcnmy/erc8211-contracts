@@ -548,6 +548,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _skipWithNonEmptyReferenceDataReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_Output_StaticCall_Insufficient_ReturnData_Reverts() public {
+        _outputStaticCallInsufficientReturnDataReverts(address(mockAccount), address(mockAccount));
+        _outputStaticCallInsufficientReturnDataReverts(address(mockAccountFallback), address(composabilityHandler));
+        _outputStaticCallInsufficientReturnDataReverts(address(mockAccountCaller), address(composabilityHandler));
+        _outputStaticCallInsufficientReturnDataReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     // -----------------------------------------------------------------------
     // GTE_SIGNED: checks that int256(-5) is the lower bound.
     // value = int256(-10) => fails (below bound)
@@ -1225,6 +1232,51 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
             );
         } else {
             expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidReferenceDataLength.selector);
+        }
+        vm.expectRevert(expectedRevert);
+        IComposableExecution(address(account)).executeComposable(executions);
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // _parseReturnDataAndWriteToStorage: dual of L-07's input-side bounds bug.
+    // If returnData is shorter than returnValues * 32, the loop's assembly mload
+    // reads past returnData into adjacent memory and persists garbage to storage
+    // slots keccak256(targetStorageSlot, i). Trigger via OutputParamFetcherType
+    // .STATIC_CALL pointing at an EOA — staticcall succeeds with returndatasize 0
+    // and returnValues > 0 attempts to write garbage. Must revert InsufficientReturnData.
+    // -----------------------------------------------------------------------
+    function _outputStaticCallInsufficientReturnDataReverts(address account, address caller) internal {
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        address eoa = address(0xeaee0a);
+        assertEq(eoa.code.length, 0);
+
+        InputParam[] memory inputParams = new InputParam[](3);
+        inputParams[0] = _createRawTargetInputParam(address(0));
+        inputParams[1] = _createRawValueInputParam(0);
+        inputParams[2] = InputParam({
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(uint256(0)), constraints: emptyConstraints
+        });
+
+        // Output: ask for 1 word from a staticcall that returns 0 bytes.
+        OutputParam[] memory outputParams = new OutputParam[](1);
+        outputParams[0] = OutputParam({
+            fetcherType: OutputParamFetcherType.STATIC_CALL,
+            paramData: abi.encode(uint256(1), eoa, abi.encodeWithSignature("anything()"), address(storageContract), SLOT_A)
+        });
+
+        ComposableExecution[] memory executions = new ComposableExecution[](1);
+        executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+        bytes memory expectedRevert;
+        if (address(account) == address(mockAccountFallback)) {
+            expectedRevert = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InsufficientReturnData.selector)
+            );
+        } else {
+            expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InsufficientReturnData.selector);
         }
         vm.expectRevert(expectedRevert);
         IComposableExecution(address(account)).executeComposable(executions);

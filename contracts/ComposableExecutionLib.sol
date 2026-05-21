@@ -27,6 +27,7 @@ library ComposableExecutionLib {
     error InvalidConstraintRange();
     error InvalidReferenceDataLength();
     error InsufficientRawValue();
+    error InsufficientReturnData();
 
     // Process the input parameters and return the composed calldata
     function processInputs(InputParam[] calldata inputParams, bytes4 functionSig) internal view returns (Execution memory) {
@@ -296,7 +297,10 @@ library ComposableExecutionLib {
         }
     }
 
-    /// @dev Parse the return data and write to the appropriate storage contract
+    /// @dev Parse the return data and write to the appropriate storage contract.
+    /// Reverts if returnData is shorter than returnValues * 32 — without this, the assembly
+    /// mload reads past returnData into adjacent memory and persists garbage to storage slots
+    /// keccak256(targetStorageSlot, i), the output-side dual of the L-07 input bounds bug.
     function _parseReturnDataAndWriteToStorage(
         uint256 returnValues,
         bytes memory returnData,
@@ -306,6 +310,7 @@ library ComposableExecutionLib {
     )
         internal
     {
+        if (returnData.length < returnValues * 32) revert InsufficientReturnData();
         for (uint256 i; i < returnValues; i++) {
             bytes32 value;
             assembly {
