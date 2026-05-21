@@ -286,6 +286,10 @@ library ComposableExecutionLib {
             if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
             return int256(uint256(value)) <= int256(uint256(bytes32(c.referenceData)));
         } else if (ct == ConstraintType.SKIP) {
+            // Enforce the NatSpec contract: SKIP carries no payload, so reject any non-empty
+            // referenceData so encoding mistakes (e.g. a stray non-32-byte blob) fail loudly
+            // instead of being silently ignored.
+            if (c.referenceData.length != 0) revert InvalidReferenceDataLength();
             return true;
         } else {
             revert InvalidConstraintType();

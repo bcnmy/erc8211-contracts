@@ -541,6 +541,13 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
         _inputParamUsingSkipConstraint(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
     }
 
+    function test_Skip_With_NonEmpty_ReferenceData_Reverts() public {
+        _skipWithNonEmptyReferenceDataReverts(address(mockAccount), address(mockAccount));
+        _skipWithNonEmptyReferenceDataReverts(address(mockAccountFallback), address(composabilityHandler));
+        _skipWithNonEmptyReferenceDataReverts(address(mockAccountCaller), address(composabilityHandler));
+        _skipWithNonEmptyReferenceDataReverts(address(mockAccountDelegateCaller), address(mockAccountDelegateCaller));
+    }
+
     // -----------------------------------------------------------------------
     // GTE_SIGNED: checks that int256(-5) is the lower bound.
     // value = int256(-10) => fails (below bound)
@@ -1185,6 +1192,42 @@ contract ComposableExecutionTestConstraintsAndReverts is ComposabilityTestBase {
             vm.expectRevert(expectedRevert);
             IComposableExecution(address(account)).executeComposable(failingExecutions);
         }
+
+        vm.stopPrank();
+    }
+
+    // -----------------------------------------------------------------------
+    // SKIP's NatSpec says referenceData must be empty. Enforce it so encoding
+    // mistakes (a stray non-32-byte blob) revert with InvalidReferenceDataLength
+    // instead of being silently ignored.
+    // -----------------------------------------------------------------------
+    function _skipWithNonEmptyReferenceDataReverts(address account, address caller) internal {
+        Constraint[] memory constraints = new Constraint[](1);
+        constraints[0] = Constraint({ constraintType: ConstraintType.SKIP, referenceData: abi.encode(uint256(123)) });
+
+        vm.startPrank(ENTRYPOINT_V07_ADDRESS);
+
+        InputParam[] memory inputParams = new InputParam[](3);
+        inputParams[0] = InputParam({
+            paramType: InputParamType.CALL_DATA, fetcherType: InputParamFetcherType.RAW_BYTES, paramData: abi.encode(uint256(42)), constraints: constraints
+        });
+        inputParams[1] = _createRawTargetInputParam(address(0));
+        inputParams[2] = _createRawValueInputParam(0);
+
+        OutputParam[] memory outputParams = new OutputParam[](0);
+        ComposableExecution[] memory executions = new ComposableExecution[](1);
+        executions[0] = ComposableExecution({ functionSig: "", inputParams: inputParams, outputParams: outputParams });
+
+        bytes memory expectedRevert;
+        if (address(account) == address(mockAccountFallback)) {
+            expectedRevert = abi.encodeWithSelector(
+                MockAccountFallback.FallbackFailed.selector, abi.encodeWithSelector(ComposableExecutionLib.InvalidReferenceDataLength.selector)
+            );
+        } else {
+            expectedRevert = abi.encodeWithSelector(ComposableExecutionLib.InvalidReferenceDataLength.selector);
+        }
+        vm.expectRevert(expectedRevert);
+        IComposableExecution(address(account)).executeComposable(executions);
 
         vm.stopPrank();
     }
