@@ -23,6 +23,11 @@ library ComposableExecutionLib {
     error ComposableExecutionFailed();
     error InvalidConstraintType();
     error InvalidSetOfInputParams(string message);
+    error EmptyOrSubConstraints();
+    error InvalidConstraintRange();
+    error InvalidReferenceDataLength();
+    error InsufficientRawValue();
+    error InsufficientReturnData();
 
     // Process the input parameters and return the composed calldata
     function processInputs(InputParam[] calldata inputParams, bytes4 functionSig) internal view returns (Execution memory) {
@@ -89,6 +94,9 @@ library ComposableExecutionLib {
             _validateConstraints(returnData, param.constraints);
             return returnData;
         } else if (param.fetcherType == InputParamFetcherType.BALANCE) {
+            // Balance is exactly one 32-byte word by construction; more than one constraint
+            // would index past the encoded value and is rejected up front.
+            if (param.constraints.length > 1) revert InvalidSetOfInputParams("BALANCE supports at most 1 constraint");
             address tokenAddr;
             address account;
             bytes calldata paramData = param.paramData;
@@ -165,32 +173,134 @@ library ComposableExecutionLib {
         }
     }
 
-    /// @dev Validate the constraints => compare the value with the reference data
+    /// @dev Validate the constraints => compare each 32-byte word of rawValue against constraints[i].
+    /// Each constraints[i] is checked against the i-th 32-byte word of rawValue (AND semantics across
+    /// the array). Use ConstraintType.OR to express OR semantics within a single word position.
+    ///
+    /// AND vs OR encoding:
+    /// - AND is implicit across the top-level `Constraint[]`. Every non-OR entry has a static
+    ///   32-byte reference (EQ/GTE/LTE/GTE_SIGNED/LTE_SIGNED) or a fixed 64-byte (lower, upper)
+    ///   payload (IN) — predictable layout, predictable gas.
+    /// - OR is a single entry whose `referenceData` is a dynamic `abi.encode(Constraint[])`. It is
+    ///   decoded once here and evaluated against the *same* 32-byte word as the outer entry. The
+    ///   sub-constraints inside the OR must be leaf constraints only — nesting OR inside OR is
+    ///   intentionally rejected (see `_checkConstraint`) to keep what the user signs flat and
+    ///   easy to display. Example:
+    ///
+    ///     Constraint[] memory subs = new Constraint[](2);
+    ///     subs[0] = Constraint({ constraintType: ConstraintType.EQ,  referenceData: abi.encode(bytes32(uint256(0))) });
+    ///     subs[1] = Constraint({ constraintType: ConstraintType.GTE, referenceData: abi.encode(bytes32(uint256(100))) });
+    ///     Constraint memory orC = Constraint({ constraintType: ConstraintType.OR, referenceData: abi.encode(subs) });
+    ///     // attach orC to the InputParam; passes iff value == 0 OR value >= 100
     function _validateConstraints(bytes memory rawValue, Constraint[] calldata constraints) private pure {
-        if (constraints.length > 0) {
-            for (uint256 i; i < constraints.length; i++) {
-                Constraint memory constraint = constraints[i];
-                bytes32 returnValue;
-                assembly {
-                    returnValue := mload(add(rawValue, add(0x20, mul(i, 0x20))))
+        uint256 len = constraints.length;
+        // Without this, the assembly mload below reads past rawValue's payload into adjacent
+        // memory (the freshly-allocated Constraint struct's constraintType word), so empty
+        // staticcall returndata or BALANCE encoded as a single word could silently satisfy
+        // zero-threshold predicates like GTE(0) or GTE_SIGNED(0).
+        if (rawValue.length < len * 32) revert InsufficientRawValue();
+        for (uint256 i; i < len;) {
+            Constraint memory c = constraints[i];
+            bytes32 value;
+            assembly {
+                value := mload(add(rawValue, add(0x20, mul(i, 0x20))))
+            }
+            if (c.constraintType == ConstraintType.OR) {
+                Constraint[] memory subs = abi.decode(c.referenceData, (Constraint[]));
+                uint256 subsLen = subs.length;
+                if (subsLen == 0) revert EmptyOrSubConstraints();
+                // Structural pre-pass: reject nested OR before evaluating any sub. Without this,
+                // rejection would depend on whether an earlier leaf happens to match, which makes
+                // "what you sign" off-chain rendering inconsistent with on-chain behavior.
+                for (uint256 j; j < subsLen;) {
+                    if (subs[j].constraintType == ConstraintType.OR) revert InvalidConstraintType();
+                    unchecked {
+                        ++j;
+                    }
                 }
-                if (constraint.constraintType == ConstraintType.EQ) {
-                    require(returnValue == bytes32(constraint.referenceData), ConstraintNotMet(ConstraintType.EQ));
-                } else if (constraint.constraintType == ConstraintType.GTE) {
-                    require(returnValue >= bytes32(constraint.referenceData), ConstraintNotMet(ConstraintType.GTE));
-                } else if (constraint.constraintType == ConstraintType.LTE) {
-                    require(returnValue <= bytes32(constraint.referenceData), ConstraintNotMet(ConstraintType.LTE));
-                } else if (constraint.constraintType == ConstraintType.IN) {
-                    (bytes32 lowerBound, bytes32 upperBound) = abi.decode(constraint.referenceData, (bytes32, bytes32));
-                    require(returnValue >= lowerBound && returnValue <= upperBound, ConstraintNotMet(ConstraintType.IN));
-                } else {
-                    revert InvalidConstraintType();
+                bool anyMet;
+                for (uint256 j; j < subsLen;) {
+                    if (_checkConstraint(value, subs[j])) {
+                        anyMet = true;
+                        break;
+                    }
+                    unchecked {
+                        ++j;
+                    }
                 }
+                if (!anyMet) revert ConstraintNotMet(c.constraintType);
+            } else {
+                if (!_checkConstraint(value, c)) revert ConstraintNotMet(c.constraintType);
+            }
+            unchecked {
+                ++i;
             }
         }
     }
 
-    /// @dev Parse the return data and write to the appropriate storage contract
+    /// @dev Returns true if value satisfies constraint c. OR is rejected here: nested OR is not
+    /// supported, so only leaf constraints may appear inside an OR's sub-array. SKIP unconditionally
+    /// returns true and exists so signers can ignore a specific 32-byte field while still validating
+    /// later fields at their fixed positions, without padding with dummy always-true predicates.
+    ///
+    /// Leaf branches (EQ, GTE, LTE, GTE_SIGNED, LTE_SIGNED) require referenceData to be exactly
+    /// 32 bytes — `bytes32(bytes)` left-aligns and zero-pads on shorter input, so an enforcement
+    /// is needed to avoid silently miscomparing non-canonical encodings (e.g. abi.encodePacked).
+    function _checkConstraint(bytes32 value, Constraint memory c) private pure returns (bool) {
+        ConstraintType ct = c.constraintType;
+        if (ct == ConstraintType.EQ) {
+            if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
+            return value == bytes32(c.referenceData);
+        } else if (ct == ConstraintType.GTE) {
+            if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
+            return value >= bytes32(c.referenceData);
+        } else if (ct == ConstraintType.LTE) {
+            if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
+            return value <= bytes32(c.referenceData);
+        } else if (ct == ConstraintType.IN) {
+            // Unsigned range only. Signers wanting a signed range must use IN_SIGNED — the unsigned
+            // comparison here cannot detect the fail-open shape IN(10, -10) where the negative bound
+            // encodes to a huge unsigned and the apparent range widens to "magnitude >= 10".
+            (bytes32 lower, bytes32 upper) = abi.decode(c.referenceData, (bytes32, bytes32));
+            if (lower > upper) revert InvalidConstraintRange();
+            return value >= lower && value <= upper;
+        } else if (ct == ConstraintType.IN_SIGNED) {
+            // Signed range. Bounds and value are reinterpreted as int256, so the high bit means
+            // negative. Catches all three concerning shapes the unsigned IN cannot: IN_SIGNED(-10, 10)
+            // works as expected, IN_SIGNED(-10, -100) reverts via signed lower > upper, and the
+            // fail-open IN_SIGNED(10, -10) also reverts because signed 10 > signed -10.
+            (bytes32 lowerBytes, bytes32 upperBytes) = abi.decode(c.referenceData, (bytes32, bytes32));
+            int256 lower = int256(uint256(lowerBytes));
+            int256 upper = int256(uint256(upperBytes));
+            if (lower > upper) revert InvalidConstraintRange();
+            int256 valueInt = int256(uint256(value));
+            return valueInt >= lower && valueInt <= upper;
+        } else if (ct == ConstraintType.GTE_SIGNED) {
+            // Reinterprets value as int256: any 32-byte word with the high bit set becomes
+            // negative under two's complement. Callers must only use GTE_SIGNED / LTE_SIGNED
+            // when the resolved value (RAW_BYTES input or STATIC_CALL return) lives in the
+            // signed int256 domain — for values that may exceed 2**255 - 1, use unsigned GTE.
+            if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
+            return int256(uint256(value)) >= int256(uint256(bytes32(c.referenceData)));
+        } else if (ct == ConstraintType.LTE_SIGNED) {
+            // See GTE_SIGNED above: signed-domain only.
+            if (c.referenceData.length != 32) revert InvalidReferenceDataLength();
+            return int256(uint256(value)) <= int256(uint256(bytes32(c.referenceData)));
+        } else if (ct == ConstraintType.SKIP) {
+            // Enforce the NatSpec contract: SKIP carries no payload, so reject any non-empty
+            // referenceData so encoding mistakes (e.g. a stray non-32-byte blob) fail loudly
+            // instead of being silently ignored.
+            if (c.referenceData.length != 0) revert InvalidReferenceDataLength();
+            return true;
+        } else {
+            revert InvalidConstraintType();
+        }
+    }
+
+    /// @dev Parse the return data and write to the appropriate storage contract.
+    /// Reverts if returnData is shorter than returnValues * 32 — without this, the assembly
+    /// mload reads past returnData into adjacent memory and persists garbage to storage slots
+    /// keccak256(targetStorageSlot, i), the output-side dual of the L-07 input bounds bug.
     function _parseReturnDataAndWriteToStorage(
         uint256 returnValues,
         bytes memory returnData,
@@ -200,6 +310,7 @@ library ComposableExecutionLib {
     )
         internal
     {
+        if (returnData.length < returnValues * 32) revert InsufficientReturnData();
         for (uint256 i; i < returnValues; i++) {
             bytes32 value;
             assembly {

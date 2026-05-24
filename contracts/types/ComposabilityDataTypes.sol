@@ -22,10 +22,21 @@ enum OutputParamFetcherType {
 
 // Constraint type for parameter validation
 enum ConstraintType {
-    EQ, // Equal to
-    GTE, // Greater than or equal to
-    LTE, // Less than or equal to
-    IN // In range
+    EQ, // Equal to (bitwise equality; suitable for signed, unsigned, addresses, bytes32)
+    GTE, // Greater than or equal to (unsigned)
+    LTE, // Less than or equal to (unsigned)
+    IN, // In range [lower, upper] (unsigned bytes32 comparison only — for signed ranges use IN_SIGNED)
+    // GTE_SIGNED / LTE_SIGNED compare via int256(uint256(value)), so any value with the
+    // high bit set is interpreted as negative under two's complement. Only use these when
+    // the resolved value is known to live in the signed int256 domain (max int256.max =
+    // 2**255 - 1). For values that may exceed 2**255 - 1, use the unsigned GTE / LTE; this
+    // applies to both RAW_BYTES inputs and STATIC_CALL return data.
+    GTE_SIGNED, // Greater than or equal to (signed int256)
+    LTE_SIGNED, // Less than or equal to (signed int256)
+    OR, // At least one sub-constraint must pass; referenceData = abi.encode(Constraint[]); sub-constraints must be leaf types (no nested OR)
+    SKIP, // Always passes; referenceData must be empty. Use to ignore a specific 32-byte field while still checking later ones at fixed positions
+    IN_SIGNED // In range [lower, upper] (signed int256 comparison). Bounds and value are reinterpreted as int256; rejects signed lower > upper. Use this for
+    // signed ranges; for unsigned ranges use IN
 }
 
 // Constraint for parameter validation
