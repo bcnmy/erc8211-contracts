@@ -33,12 +33,9 @@ The actual storage slot used in `Storage.sol` depends on both the `account` addr
 
 ## Audits
 
-Both audits cover the codebase on `main`:
-
-- [`audits/2025-03-Composability-Pashov-Review.pdf`](audits/2025-03-Composability-Pashov-Review.pdf) — Pashov Audit Group review (March 2025).
-- [`audits/2025-03-Composability_Zenith-Audit-Report.pdf`](audits/2025-03-Composability_Zenith-Audit-Report.pdf) — Zenith audit report (March 2025).
-
-The [`feat/signed-constraints-and-or-composition`](https://github.com/bcnmy/erc8211-contracts/pull/1) branch adds signed-integer constraints (`GTE_SIGNED`, `LTE_SIGNED`) and OR predicate composition. It is **not yet audited** — the open PR is intentionally left open for community review.
+- [`audits/2026-05-Composability-Nexus-Pashov-Review.pdf`](audits/2026-05-Composability-Nexus-Pashov-Review.pdf) — Pashov Audit Group review (May 2026). Covers the [`feat/signed-constraints-and-or-composition`](https://github.com/bcnmy/erc8211-contracts/pull/1) additions: signed-integer constraints (`GTE_SIGNED`, `LTE_SIGNED`), `IN_SIGNED`, OR predicate composition, `SKIP`, and validation-pipeline hardening. All seven findings resolved.
+- [`audits/2025-03-Composability-Pashov-Review.pdf`](audits/2025-03-Composability-Pashov-Review.pdf) — Pashov Audit Group review (March 2025). Covers the original composability surface (`EQ` / `GTE` / `LTE` / `IN`, `RAW_BYTES` / `STATIC_CALL` / `BALANCE` fetchers).
+- [`audits/2025-03-Composability_Zenith-Audit-Report.pdf`](audits/2025-03-Composability_Zenith-Audit-Report.pdf) — Zenith audit report (March 2025). Same scope as the 2025-03 Pashov review.
 
 ## Spec & links
 
